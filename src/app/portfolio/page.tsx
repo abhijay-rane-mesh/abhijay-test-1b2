@@ -17,10 +17,26 @@ export default function PortfolioPage() {
         throw new Error("No access token. Connect an account first.");
       }
 
+      // Get all connected accounts for Mesh holdings API
+      // Each account should have authToken and type for holdings API
+      const connectedAccountsStr = window.localStorage.getItem("mesh_connected_accounts");
+      let connectedAccounts: any[] = [];
+      
+      if (connectedAccountsStr) {
+        try {
+          connectedAccounts = JSON.parse(connectedAccountsStr);
+        } catch (e) {
+          console.error("[Portfolio] Failed to parse connected accounts", e);
+        }
+      }
+
       const res = await fetch("/api/portfolio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accessToken: token }),
+        body: JSON.stringify({ 
+          accessToken: token,
+          connectedAccounts: connectedAccounts.length > 0 ? connectedAccounts : undefined,
+        }),
       });
 
       if (!res.ok) {
@@ -28,8 +44,37 @@ export default function PortfolioPage() {
         throw new Error(body.error || "Failed to load portfolio");
       }
 
-      const data = await res.json();
-      setPortfolio(data);
+          const data = await res.json();
+          setPortfolio(data);
+          
+          // Update connected accounts with extracted wallet addresses
+          if (data.walletAddresses && Object.keys(data.walletAddresses).length > 0) {
+            const connectedAccountsStr = window.localStorage.getItem("mesh_connected_accounts");
+            if (connectedAccountsStr) {
+              try {
+                const connectedAccounts = JSON.parse(connectedAccountsStr);
+                let updated = false;
+                for (const accountId in data.walletAddresses) {
+                  const walletAddress = data.walletAddresses[accountId];
+                  const accountIndex = connectedAccounts.findIndex(
+                    (acc: any) => acc.accountId === accountId || acc.meshAccountId === accountId
+                  );
+                  if (accountIndex >= 0 && walletAddress && walletAddress.startsWith("0x")) {
+                    if (connectedAccounts[accountIndex].walletAddress !== walletAddress) {
+                      connectedAccounts[accountIndex].walletAddress = walletAddress;
+                      updated = true;
+                      console.log(`[Portfolio] Updated wallet address for account ${accountId}:`, walletAddress);
+                    }
+                  }
+                }
+                if (updated) {
+                  window.localStorage.setItem("mesh_connected_accounts", JSON.stringify(connectedAccounts));
+                }
+              } catch (e) {
+                console.error("Failed to update wallet addresses from portfolio", e);
+              }
+            }
+          }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);

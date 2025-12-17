@@ -84,7 +84,10 @@ export default function Home() {
 
             const userId = "user-local-1";
 
-            // Extract auth token
+            // Extract auth token (for managed transfers)
+            // NOTE: payload.accessToken can be either:
+            // 1. An object: {accountTokens: [{accessToken: "...", account: {...}}], brokerType: "..."}
+            // 2. A string: "token_string" (legacy format)
             const rawToken =
               payload.accessToken ?? payload.token ?? payload.authToken ?? null;
 
@@ -94,47 +97,178 @@ export default function Home() {
             }
 
             let fromAuthToken: string = "";
+            let integrationToken: string | null = null; // For holdings API
+            let refreshToken: string | null = null; // For token refresh
             let extractedMeshAccountId: string | null = null;
             let parsedToken: any = null;
 
             try {
-              parsedToken = rawToken;
-              if (typeof rawToken === "string") {
-                try {
-                  parsedToken = JSON.parse(rawToken);
-                } catch {
+              // Handle case where payload.accessToken is already an object (new format)
+              if (typeof rawToken === "object" && rawToken !== null) {
+                parsedToken = rawToken;
+                console.log("[Mesh] rawToken is already an object, using directly");
+              } else if (typeof rawToken === "string") {
+                // Try to parse if it's a JSON string
+                if (rawToken.startsWith("{") || rawToken.startsWith("[")) {
+                  try {
+                    parsedToken = JSON.parse(rawToken);
+                    console.log("[Mesh] Successfully parsed rawToken as JSON string");
+                  } catch (parseErr) {
+                    console.warn("[Mesh] Failed to parse rawToken as JSON:", parseErr);
+                    parsedToken = rawToken;
+                  }
+                } else {
+                  // Plain string token
                   parsedToken = rawToken;
+                }
+              } else {
+                parsedToken = rawToken;
+              }
+
+              // CRITICAL: Extract token from accountTokens[0].accessToken OR accountTokens[0].authToken
+              // Priority 1: payload.accessToken.accountTokens[0].accessToken (new format - accessToken field)
+              if (payload.accessToken && typeof payload.accessToken === "object" && payload.accessToken.accountTokens?.[0]?.accessToken) {
+                const extracted = String(payload.accessToken.accountTokens[0].accessToken);
+                if (extracted.length > 20 && !extracted.startsWith("{") && !extracted.startsWith("[")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  extractedMeshAccountId =
+                    payload.accessToken.accountTokens[0]?.account?.meshAccountId ??
+                    payload.accessToken.accountTokens[0]?.account?.frontAccountId ??
+                    null;
+                  // Also extract refreshToken if available
+                  if (payload.accessToken.accountTokens[0]?.refreshToken) {
+                    refreshToken = String(payload.accessToken.accountTokens[0].refreshToken);
+                  }
+                  console.log("[Mesh] Extracted token from payload.accessToken.accountTokens[0].accessToken", {
+                    tokenLength: extracted.length,
+                    tokenPrefix: extracted.substring(0, 30),
+                    meshAccountId: extractedMeshAccountId,
+                    accountId: payload.accessToken.accountTokens[0]?.account?.accountId,
+                    accountName: payload.accessToken.accountTokens[0]?.account?.accountName,
+                  });
                 }
               }
 
-              if (parsedToken?.accountTokens?.[0]?.authToken) {
-                fromAuthToken = String(parsedToken.accountTokens[0].authToken);
-                extractedMeshAccountId =
-                  parsedToken.accountTokens[0]?.account?.meshAccountId ?? null;
-              } else if (
-                payload.accessToken &&
-                typeof payload.accessToken === "string" &&
-                payload.accessToken.length > 20
-              ) {
-                fromAuthToken = payload.accessToken;
-              } else if (
-                typeof rawToken === "string" &&
-                rawToken.length > 20 &&
-                !rawToken.startsWith("{")
-              ) {
-                fromAuthToken = rawToken;
-              } else {
-                fromAuthToken =
-                  typeof rawToken === "string"
-                    ? rawToken
-                    : JSON.stringify(rawToken);
+              // Priority 2: parsedToken.accountTokens[0].accessToken (if parsedToken is the object)
+              if ((!fromAuthToken || fromAuthToken.length < 20) && parsedToken?.accountTokens?.[0]?.accessToken) {
+                const extracted = String(parsedToken.accountTokens[0].accessToken);
+                if (extracted.length > 20 && !extracted.startsWith("{")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  extractedMeshAccountId =
+                    parsedToken.accountTokens[0]?.account?.meshAccountId ?? null;
+                  // Also extract refreshToken if available
+                  if (!refreshToken && parsedToken.accountTokens[0]?.refreshToken) {
+                    refreshToken = String(parsedToken.accountTokens[0].refreshToken);
+                  }
+                  console.log("[Mesh] Extracted token from parsedToken.accountTokens[0].accessToken");
+                }
+              }
+
+              // Priority 3: accountTokens[0].authToken (fallback - some formats use authToken instead)
+              if ((!fromAuthToken || fromAuthToken.length < 20) && parsedToken?.accountTokens?.[0]?.authToken) {
+                const extracted = String(parsedToken.accountTokens[0].authToken);
+                if (extracted.length > 20 && !extracted.startsWith("{")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  extractedMeshAccountId =
+                    parsedToken.accountTokens[0]?.account?.meshAccountId ?? null;
+                  console.log("[Mesh] Extracted token from parsedToken.accountTokens[0].authToken");
+                }
+              }
+              
+              // Priority 4: Check payload.accountTokens (if payload itself has the structure)
+              if ((!fromAuthToken || fromAuthToken.length < 20) && payload?.accountTokens?.[0]?.accessToken) {
+                const extracted = String(payload.accountTokens[0].accessToken);
+                if (extracted.length > 20 && !extracted.startsWith("{")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  extractedMeshAccountId =
+                    payload.accountTokens[0]?.account?.meshAccountId ?? null;
+                  console.log("[Mesh] Extracted token from payload.accountTokens[0].accessToken");
+                }
+              }
+
+              // Priority 5: payload.accountTokens[0].authToken
+              if ((!fromAuthToken || fromAuthToken.length < 20) && payload?.accountTokens?.[0]?.authToken) {
+                const extracted = String(payload.accountTokens[0].authToken);
+                if (extracted.length > 20 && !extracted.startsWith("{")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  extractedMeshAccountId =
+                    payload.accountTokens[0]?.account?.meshAccountId ?? null;
+                  console.log("[Mesh] Extracted token from payload.accountTokens[0].authToken");
+                }
+              }
+
+              // Priority 3: Direct authToken in parsedToken
+              if ((!fromAuthToken || fromAuthToken.length < 20) && parsedToken?.authToken) {
+                const extracted = String(parsedToken.authToken);
+                if (extracted.length > 20 && !extracted.startsWith("{")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  console.log("[Mesh] Extracted token from parsedToken.authToken");
+                }
+              }
+
+              // Priority 4: Direct authToken in payload
+              if ((!fromAuthToken || fromAuthToken.length < 20) && payload.authToken) {
+                const extracted = String(payload.authToken);
+                if (extracted.length > 20 && !extracted.startsWith("{")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  console.log("[Mesh] Extracted token from payload.authToken");
+                }
+              }
+
+              // Priority 5: Direct integrationToken in payload
+              if ((!fromAuthToken || fromAuthToken.length < 20) && payload.integrationToken) {
+                const extracted = String(payload.integrationToken);
+                if (extracted.length > 20 && !extracted.startsWith("{")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  console.log("[Mesh] Extracted token from payload.integrationToken");
+                }
+              }
+
+              // Priority 6: accessToken if it's a plain string (not JSON)
+              if ((!fromAuthToken || fromAuthToken.length < 20) && payload.accessToken) {
+                const extracted = String(payload.accessToken);
+                if (extracted.length > 20 && !extracted.startsWith("{") && !extracted.startsWith("[")) {
+                  fromAuthToken = extracted;
+                  integrationToken = fromAuthToken;
+                  console.log("[Mesh] Extracted token from payload.accessToken (plain string)");
+                }
+              }
+
+              // Priority 7: rawToken if it's a plain string (not JSON)
+              if ((!fromAuthToken || fromAuthToken.length < 20) && typeof rawToken === "string") {
+                if (rawToken.length > 20 && !rawToken.startsWith("{") && !rawToken.startsWith("[")) {
+                  fromAuthToken = rawToken;
+                  integrationToken = fromAuthToken;
+                  console.log("[Mesh] Using rawToken as plain string");
+                }
+              }
+              
+              // Validate that we have a proper token
+              if (!fromAuthToken || fromAuthToken.length < 20 || fromAuthToken.startsWith("{") || fromAuthToken.startsWith("[")) {
+                console.error("[Mesh] Invalid fromAuthToken extracted:", {
+                  fromAuthTokenLength: fromAuthToken?.length,
+                  fromAuthTokenPrefix: fromAuthToken?.substring(0, 50),
+                  hasAccountTokens: !!parsedToken?.accountTokens,
+                  parsedTokenKeys: parsedToken && typeof parsedToken === "object" ? Object.keys(parsedToken) : "not an object",
+                  payloadKeys: Object.keys(payload),
+                  rawTokenType: typeof rawToken,
+                  rawTokenLength: typeof rawToken === "string" ? rawToken.length : "not a string",
+                  rawTokenPrefix: typeof rawToken === "string" ? rawToken.substring(0, 50) : "not a string",
+                });
+                throw new Error("Failed to extract valid authToken from connection payload");
               }
             } catch (err) {
               console.error("[Mesh] Error parsing token:", err);
-              fromAuthToken =
-                typeof rawToken === "string"
-                  ? rawToken
-                  : JSON.stringify(rawToken);
+              // Don't set fromAuthToken to rawToken if it's JSON - that will fail validation
+              throw err; // Re-throw to prevent continuing with invalid token
             }
 
             if (!extractedMeshAccountId) {
@@ -148,7 +282,9 @@ export default function Home() {
                 accountData.meshAccountId ??
                 accountData.frontAccountId ??
                 parsedToken?.accountTokens?.[0]?.account?.meshAccountId ??
+                parsedToken?.accountTokens?.[0]?.account?.frontAccountId ??
                 payload.meshAccountId ??
+                payload.frontAccountId ??
                 payload.accountId ??
                 null;
             }
@@ -164,8 +300,16 @@ export default function Home() {
               accountData.accountId ??
               payload.accountId ??
               accountData.meshAccountId ??
+              accountData.frontAccountId ??
               extractedMeshAccountId ??
               null;
+            
+            // Also extract frontAccountId if available (may be same as meshAccountId but stored separately for compatibility)
+            const frontAccountId = 
+              accountData.frontAccountId ??
+              parsedToken?.accountTokens?.[0]?.account?.frontAccountId ??
+              payload.frontAccountId ??
+              extractedMeshAccountId; // Fallback to meshAccountId if frontAccountId not available
             
             const integrationId = payload.integrationId ?? null;
             
@@ -180,6 +324,25 @@ export default function Home() {
               parsedToken?.type ??
               accountData.brokerType ??
               null;
+
+            // Extract wallet address for MetaMask/DeFi wallets (for "To Address" in transfers)
+            // For DeFi wallets, we need to fetch the actual address from Mesh API
+            // The accountId is NOT the wallet address - it's a Mesh internal ID
+            let walletAddress = 
+              accountData.address ??
+              accountData.walletAddress ??
+              payload.address ??
+              payload.walletAddress ??
+              null;
+            
+            // For DeFi wallets, if we don't have an address yet, we'll fetch it after connection
+            // Check if accountId looks like an Ethereum address (starts with 0x and is 42 chars)
+            if (!walletAddress && accountId && typeof accountId === "string" && accountId.startsWith("0x") && accountId.length === 42) {
+              walletAddress = accountId; // Only use accountId if it's a valid Ethereum address
+            }
+            
+            // For Coinbase Wallet and other DeFi wallets, we'll fetch the address via API
+            // This will be done asynchronously after connection
 
             // Use brokerName if available (e.g., "MetaMask", "Coinbase") - TOP LEVEL FIRST
             // IMPORTANT: payload.brokerName is the broker name (e.g., "Coinbase")
@@ -227,7 +390,7 @@ export default function Home() {
               meshProviderType,
             });
 
-            // Log for debugging - show full payload structure
+            // Log for debugging - show full payload structure, especially for wallet address extraction
             console.log("[Mesh] Account connection details:", {
               payloadKeys: Object.keys(payload),
               parsedTokenKeys: parsedToken ? Object.keys(parsedToken) : null,
@@ -240,6 +403,16 @@ export default function Home() {
               integrationId,
               accountId,
               extractedMeshAccountId,
+              // Log address-related fields for debugging
+              accountDataAddress: accountData.address,
+              accountDataWalletAddress: accountData.walletAddress,
+              payloadAddress: payload.address,
+              payloadWalletAddress: payload.walletAddress,
+              accountTokensAddress: parsedToken?.accountTokens?.[0]?.account?.address,
+              accountTokensWalletAddress: parsedToken?.accountTokens?.[0]?.account?.walletAddress,
+              extractedWalletAddress: walletAddress,
+              // Log full accountData structure for DeFi wallets
+              accountDataFull: meshProviderType === "deFiWallet" || meshProviderType === "metamask" ? accountData : undefined,
             });
 
             // Store in state
@@ -251,24 +424,52 @@ export default function Home() {
             try {
               window.localStorage.setItem("mesh_access_token", fromAuthToken);
               window.localStorage.setItem("mesh_provider_type", meshProviderType || "unknown");
+              if (integrationToken) {
+                window.localStorage.setItem("mesh_integration_token", integrationToken);
+              }
               if (extractedMeshAccountId) {
                 window.localStorage.setItem(
                   "mesh_account_id",
                   extractedMeshAccountId
                 );
               }
+              // Store wallet address for MetaMask/DeFi wallets (for transfer "To Address")
+              if (walletAddress && (meshProviderType === "deFiWallet" || meshProviderType === "metamask")) {
+                window.localStorage.setItem("app_wallet_address", walletAddress);
+              }
 
               // Add to connected accounts
+              // IMPORTANT: For Managed Transfers, we need fromAuthToken (authToken from accountTokens[0].authToken)
+              // For Holdings API, we use integrationToken (which is the same as fromAuthToken for most cases)
               const newAccount = {
                 accountId: accountId || extractedMeshAccountId,
                 meshAccountId: extractedMeshAccountId,
+                frontAccountId: frontAccountId || extractedMeshAccountId, // Store frontAccountId for compatibility
                 integrationId,
                 providerType: meshProviderType || "unknown",
                 name: displayName,
                 brokerType: meshProviderType || "unknown", // Store the actual brokerType
                 brokerName, // Store brokerName for reference (e.g., "Coinbase", "MetaMask")
                 accountName: accountData.accountName, // Store account name (e.g., "SOL wallets")
+                integrationToken, // Store integration token for holdings API
+                authToken: fromAuthToken, // Store fromAuthToken for Managed Transfers (this is the authToken from accountTokens[0].authToken)
+                fromAuthToken, // Explicitly store for Managed Transfers API
+                refreshToken, // Store refreshToken for token refresh if needed
+                type: meshProviderType || "unknown", // Alias for holdings API (Mesh expects 'type')
+                walletAddress, // Store wallet address for transfers (may be null initially for DeFi wallets)
               };
+
+              // Log the stored account for debugging
+              console.log("[Mesh] Storing account:", {
+                name: displayName,
+                meshAccountId: extractedMeshAccountId,
+                accountId: accountId || extractedMeshAccountId,
+                brokerType: meshProviderType,
+                fromAuthTokenLength: fromAuthToken?.length,
+                fromAuthTokenPrefix: fromAuthToken?.substring(0, 30),
+                integrationTokenLength: integrationToken?.length,
+                hasRefreshToken: !!refreshToken,
+              });
 
               const existing = JSON.parse(
                 window.localStorage.getItem("mesh_connected_accounts") || "[]"
@@ -279,6 +480,54 @@ export default function Home() {
                 JSON.stringify(updated)
               );
               setConnectedAccounts(updated);
+
+              // For DeFi wallets (Coinbase Wallet, MetaMask), try to fetch the actual wallet address
+              // Try using the addresses/list endpoint which doesn't require networkId
+              if ((meshProviderType === "deFiWallet" || meshProviderType === "metamask") && !walletAddress && integrationToken) {
+                // Try to get wallet address using the list endpoint (no networkId required)
+                fetch("/api/wallet-address", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    authToken: integrationToken,
+                    type: meshProviderType,
+                    // No networkId needed - will use list endpoint
+                  }),
+                })
+                  .then((addrRes) => {
+                    if (!addrRes.ok) {
+                      throw new Error(`HTTP ${addrRes.status}`);
+                    }
+                    return addrRes.json();
+                  })
+                  .then((addrData) => {
+                    const fetchedAddress = addrData.content?.address;
+                    if (fetchedAddress && typeof fetchedAddress === "string" && fetchedAddress.startsWith("0x") && fetchedAddress.length === 42) {
+                      // Update the account with the correct wallet address
+                      const updatedAccounts = JSON.parse(
+                        window.localStorage.getItem("mesh_connected_accounts") || "[]"
+                      );
+                      const accountIndex = updatedAccounts.findIndex(
+                        (acc: any) => acc.accountId === newAccount.accountId || acc.meshAccountId === newAccount.meshAccountId
+                      );
+                      if (accountIndex >= 0) {
+                        updatedAccounts[accountIndex].walletAddress = fetchedAddress;
+                        window.localStorage.setItem(
+                          "mesh_connected_accounts",
+                          JSON.stringify(updatedAccounts)
+                        );
+                        setConnectedAccounts(updatedAccounts);
+                        console.log("[Mesh] Fetched wallet address:", fetchedAddress);
+                      }
+                    } else {
+                      console.warn("[Mesh] Invalid address format received:", fetchedAddress);
+                    }
+                  })
+                  .catch((err) => {
+                    console.warn("[Mesh] Failed to fetch wallet address (will try from portfolio later):", err.message);
+                    // Don't show error to user - portfolio page will try to extract from holdings
+                  });
+              }
             } catch {}
 
             // Store in backend
@@ -487,7 +736,7 @@ export default function Home() {
                     </span>
                   </div>
                   <p className="text-xs text-zinc-400 mb-2">
-                    Account: {account.accountId?.substring(0, 20)}...
+                    Account ID: {account.accountId || account.meshAccountId || "N/A"}
                   </p>
                   <div className="flex gap-2 mt-4">
                     <button
@@ -558,7 +807,7 @@ export default function Home() {
                         <td className="py-2 px-4 text-zinc-400">
                           {account.brokerType}
                         </td>
-                        <td className="py-2 px-4 text-zinc-400 text-xs">
+                        <td className="py-2 px-4 text-zinc-400 text-xs font-mono">
                           {account.accountId}
                         </td>
                       </tr>
