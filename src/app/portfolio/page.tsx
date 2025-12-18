@@ -98,13 +98,9 @@ export default function PortfolioPage() {
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50 p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold mb-6">Mesh API Demo</h1>
-        <Navigation />
-
-        <div className="bg-blue-600/20 border border-blue-500/50 rounded-lg p-4 mb-6">
-          <p className="text-sm">
-            <strong>Portfolio API</strong> Fetches portfolio data for all connected accounts dynamically. Data is stored in Zustand and updated when you switch to this tab.
-          </p>
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-3xl font-bold">Mesh API</h1>
+          <Navigation />
         </div>
 
         {loading && <p className="text-zinc-400">Loading portfolio...</p>}

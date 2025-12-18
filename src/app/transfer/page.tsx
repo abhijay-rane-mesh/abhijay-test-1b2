@@ -5,6 +5,43 @@ import Navigation from "@/components/Navigation";
 
 type TransferStep = "configure" | "preview" | "execute" | "success";
 
+const normType = (v: unknown) => String(v ?? "").trim().toLowerCase();
+
+const inferAccountBrokerType = (acc: unknown) => {
+  if (!acc || typeof acc !== "object") return "";
+  const a = acc as Record<string, unknown>;
+
+  const direct =
+    a.brokerType ?? a.providerType ?? a.type ?? a.integrationType ?? a.broker_type;
+  const directNorm = normType(direct);
+  if (directNorm) return directNorm;
+
+  const name = normType(a.brokerName ?? a.name ?? a.integrationName);
+  // Mesh Link returns brokerType=deFiWallet for Phantom/MetaMask connections.
+  if (name.includes("phantom") || name.includes("metamask")) return "defiwallet";
+
+  const accountId = String(a.accountId ?? "").trim();
+  if (accountId.startsWith("0x")) return "defiwallet";
+
+  return "";
+};
+
+const getNetworkSupportedBrokerTypes = (network: unknown): string[] => {
+  if (!network || typeof network !== "object") return [];
+  // Mesh API shapes vary; try a few likely keys.
+  const n = network as Record<string, unknown>;
+  const candidates: unknown[] = [
+    n.supportedBrokerTypes,
+    n.supportedIntegrationTypes,
+    n.supportedFromTypes,
+    n.fromTypes,
+    n.brokerTypes,
+  ];
+  const raw = candidates.find((v) => Array.isArray(v)) as unknown[] | undefined;
+  if (!raw) return [];
+  return raw.map(normType).filter(Boolean);
+};
+
 export default function TransferPage() {
   const [step, setStep] = useState<TransferStep>("configure");
   const [networks, setNetworks] = useState<any[]>([]);
@@ -12,6 +49,7 @@ export default function TransferPage() {
   const [connectedAccounts, setConnectedAccounts] = useState<any[]>([]);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [walletAddresses, setWalletAddresses] = useState<any[]>([]);
+  const [connectedAccountsSource, setConnectedAccountsSource] = useState<string>("not_loaded");
   const [selectedNetwork, setSelectedNetwork] = useState<string>("");
   const [selectedAccount, setSelectedAccount] = useState<string>("");
   const [selectedSymbol, setSelectedSymbol] = useState<string>("");
@@ -116,7 +154,91 @@ export default function TransferPage() {
     return null;
   };
 
+  const loadConnectedAccountsFromStorage = () => {
+    try {
+      // 1) Preferred legacy key (used throughout this demo app)
+      const raw = window.localStorage.getItem("mesh_connected_accounts");
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          setConnectedAccounts(parsed);
+          setConnectedAccountsSource("mesh_connected_accounts");
+          console.log("[Transfer] Loaded connected accounts:", {
+            source: "mesh_connected_accounts",
+            count: parsed.length,
+          });
+          return parsed;
+        }
+        // Some apps accidentally store the zustand wrapper under this key; support it.
+        if (parsed && typeof parsed === "object") {
+          const state = (parsed as Record<string, unknown>).state;
+          if (state && typeof state === "object") {
+            const accounts = (state as Record<string, unknown>).accounts;
+            if (Array.isArray(accounts)) {
+              setConnectedAccounts(accounts);
+              setConnectedAccountsSource("mesh_connected_accounts(state.accounts)");
+              console.log("[Transfer] Loaded connected accounts:", {
+                source: "mesh_connected_accounts(state.accounts)",
+                count: accounts.length,
+              });
+              return accounts;
+            }
+          }
+        }
+      }
+
+      // 2) Fallback: Zustand persist store (`src/store/meshStore.ts` uses name: "mesh-storage")
+      const rawZustand = window.localStorage.getItem("mesh-storage");
+      if (rawZustand) {
+        const parsed = JSON.parse(rawZustand) as unknown;
+        if (parsed && typeof parsed === "object") {
+          const state = (parsed as Record<string, unknown>).state;
+          if (state && typeof state === "object") {
+            const accounts = (state as Record<string, unknown>).accounts;
+            if (Array.isArray(accounts)) {
+              setConnectedAccounts(accounts);
+              setConnectedAccountsSource("mesh-storage(state.accounts)");
+              console.log("[Transfer] Loaded connected accounts:", {
+                source: "mesh-storage(state.accounts)",
+                count: accounts.length,
+              });
+
+              // Auto-heal: keep `mesh_connected_accounts` in sync so other pages can read it.
+              try {
+                window.localStorage.setItem(
+                  "mesh_connected_accounts",
+                  JSON.stringify(accounts)
+                );
+              } catch {
+                // ignore
+              }
+              return accounts;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[Transfer] Failed to load connected accounts from storage:", e);
+    }
+
+    setConnectedAccounts([]);
+    setConnectedAccountsSource("empty");
+    console.log("[Transfer] Loaded connected accounts:", { source: "empty", count: 0 });
+    return [];
+  };
+
   useEffect(() => {
+    // Preselect account if present (?accountId=...) from Accounts page "Transfer →"
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const preselected = params.get("accountId");
+      if (preselected) {
+        setSelectedAccount(preselected);
+      }
+    } catch {
+      // ignore
+    }
+
     // Load wallet address from localStorage
     const stored = window.localStorage.getItem("app_wallet_address");
     if (stored) {
@@ -166,44 +288,36 @@ export default function TransferPage() {
         setError(`Failed to load integrations: ${err.message}`);
       });
 
-    // Load connected accounts from localStorage
-    const connectedAccountsStr = window.localStorage.getItem("mesh_connected_accounts");
-    if (connectedAccountsStr) {
-      try {
-        const parsed = JSON.parse(connectedAccountsStr);
-        setConnectedAccounts(parsed);
-      } catch (e) {
-        console.error("[Transfer] Failed to parse connected accounts", e);
-      }
-    }
+    const loadedAccounts = loadConnectedAccountsFromStorage();
+    console.log("[Transfer] Storage key presence:", {
+      has_mesh_connected_accounts: !!window.localStorage.getItem("mesh_connected_accounts"),
+      has_mesh_storage: !!window.localStorage.getItem("mesh-storage"),
+    });
+    // Build wallet addresses for "To Address" dropdown (EVM only from Mesh accounts)
+    try {
+      const wallets = loadedAccounts
+        .filter(
+          (acc: any) =>
+            acc?.brokerType === "metamask" ||
+            acc?.brokerType === "deFiWallet" ||
+            acc?.walletAddress ||
+            (acc?.accountId && String(acc.accountId).startsWith("0x"))
+        )
+        .map((acc: any) => ({
+          // Normalize EVM-style wallet addresses (MetaMask accountId is often missing 0x)
+          address: normalizeEvmAddress(String(acc.walletAddress || acc.accountId || "").trim()),
+          name: acc.name || acc.brokerName || "Wallet",
+          brokerType: acc.brokerType,
+          accountId: acc.accountId,
+        }));
+      setWalletAddresses(wallets);
 
-    // Load wallet addresses for "To Address" dropdown
-    if (connectedAccountsStr) {
-      try {
-        const parsed = JSON.parse(connectedAccountsStr);
-        const wallets = parsed
-          .filter((acc: any) => 
-            acc.brokerType === "metamask" || 
-            acc.brokerType === "deFiWallet" || 
-            acc.walletAddress ||
-            (acc.accountId && acc.accountId.startsWith("0x"))
-          )
-          .map((acc: any) => ({
-            // Normalize EVM-style wallet addresses (MetaMask accountId is often missing 0x)
-            address: normalizeEvmAddress(String(acc.walletAddress || acc.accountId || "").trim()),
-            name: acc.name || acc.brokerName || "Wallet",
-            brokerType: acc.brokerType,
-            accountId: acc.accountId,
-          }));
-        setWalletAddresses(wallets);
-        
-        if (wallets.length > 0 && !toAddress) {
-          setToAddress(wallets[0].address);
-          window.localStorage.setItem("app_wallet_address", wallets[0].address);
-        }
-      } catch (e) {
-        console.error("[Transfer] Failed to parse connected accounts for wallet addresses", e);
+      if (wallets.length > 0 && !toAddress) {
+        setToAddress(wallets[0].address);
+        window.localStorage.setItem("app_wallet_address", wallets[0].address);
       }
+    } catch (e) {
+      console.error("[Transfer] Failed to compute wallet addresses", e);
     }
   }, []);
 
@@ -212,6 +326,16 @@ export default function TransferPage() {
     if (!selectedNetwork) return;
 
     const current = String(toAddress || "").trim();
+    // Normalize common EVM case (missing 0x) without changing the user's intent.
+    if (selectedNetworkKind === "evm" && isHex40(current)) {
+      const normalized = normalizeEvmAddress(current);
+      if (normalized !== current) {
+        setToAddress(normalized);
+        window.localStorage.setItem("app_wallet_address", normalized);
+        return;
+      }
+    }
+
     const isCurrentOk =
       selectedNetworkKind === "solana"
         ? isSolanaAddress(current)
@@ -219,23 +343,20 @@ export default function TransferPage() {
           ? isEvmAddress(current)
           : !!current;
 
-    // If current destination is incompatible, try to auto-pick a compatible one from dropdown.
-    if (!isCurrentOk) {
-      if (filteredWalletAddresses.length > 0) {
-        const next = String(filteredWalletAddresses[0].address || "").trim();
-        if (next) {
-          setToAddress(next);
-          window.localStorage.setItem("app_wallet_address", next);
-          setToAddressMode("select");
-          return;
-        }
+    // If current destination is incompatible and user is using "select" mode,
+    // try to auto-pick a compatible one from dropdown. If none exists, clear the value
+    // but keep the user's mode choice (don't force-switch to manual).
+    if (!isCurrentOk && toAddressMode === "select") {
+      const next = String(filteredWalletAddresses?.[0]?.address || "").trim();
+      if (next) {
+        setToAddress(next);
+        window.localStorage.setItem("app_wallet_address", next);
+      } else {
+        setToAddress("");
+        window.localStorage.setItem("app_wallet_address", "");
       }
-      // Otherwise force manual entry with an empty value.
-      setToAddress("");
-      window.localStorage.setItem("app_wallet_address", "");
-      setToAddressMode("manual");
     }
-  }, [selectedNetwork, selectedNetworkKind, walletAddresses]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedNetwork, selectedNetworkKind, walletAddresses, toAddressMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update available symbols when network changes
   useEffect(() => {
@@ -301,58 +422,32 @@ export default function TransferPage() {
     fetchTokenPrice();
   }, [selectedSymbol, selectedAccount]);
 
-  // Filter accounts based on selected network and integration support
+  // Filter accounts based on integrations only (ignore network.supportedBrokerTypes to avoid over-filtering)
   useEffect(() => {
-    if (!selectedNetwork || integrations.length === 0 || connectedAccounts.length === 0) {
+    if (!selectedNetwork || connectedAccounts.length === 0 || integrations.length === 0) {
       setAccounts([]);
       return;
     }
 
-    // Find the selected network
-    const network = networks.find((n: any) => n.id === selectedNetwork);
-    if (!network) {
-      setAccounts([]);
-      return;
-    }
-
-    // Get supported broker types for this network
-    const supportedBrokerTypes = network.supportedBrokerTypes || [];
-
-    // Find integrations that:
-    // 1. Support outgoing transfers
-    // 2. Match the supported broker types for this network
-    const supportedIntegrations = integrations.filter((integration: any) => {
-      if (!integration.supportsOutgoingTransfers) return false;
-      
-      // Check if integration type is supported by the network
-      return supportedBrokerTypes.includes(integration.type);
-    });
-
-    // Match connected accounts with supported integrations
+    // Only require that an integration of this type exists and supports outgoing transfers.
     const availableAccounts = connectedAccounts
-      .filter((connectedAccount: any) => {
-        // Normalize brokerType for comparison
-        const accountType = connectedAccount.brokerType || connectedAccount.providerType;
-        
-        // Find matching integration
-        const matchingIntegration = supportedIntegrations.find(
-          (integration: any) => integration.type === accountType
+      .map((acc: any) => {
+        const accountType = inferAccountBrokerType(acc);
+        const matchingIntegration = integrations.find(
+          (integration: any) =>
+            normType(integration?.type) === accountType &&
+            integration?.supportsOutgoingTransfers
         );
-        
-        return !!matchingIntegration;
-      })
-      .map((connectedAccount: any) => {
-        const accountType = connectedAccount.brokerType || connectedAccount.providerType;
-        const matchingIntegration = supportedIntegrations.find(
-          (integration: any) => integration.type === accountType
-        );
-        
+
+        if (!matchingIntegration) return null;
+
         return {
-          ...connectedAccount,
-          integrationId: matchingIntegration?.id || connectedAccount.integrationId,
-          integrationName: matchingIntegration?.name || connectedAccount.name,
+          ...acc,
+          integrationId: matchingIntegration.id || acc.integrationId,
+          integrationName: matchingIntegration.name || acc.integrationName || acc.name,
         };
-      });
+      })
+      .filter(Boolean) as any[];
 
     setAccounts(availableAccounts);
     
@@ -697,6 +792,19 @@ export default function TransferPage() {
       const data = await res.json();
       setConfigureData(data);
 
+      // If Mesh says the holding is not eligible for transfer, stop here and surface a clear message
+      const firstHolding = data?.content?.holdings?.[0];
+      if (firstHolding && firstHolding.eligibleForTransfer === false) {
+        const reason: string =
+          firstHolding.ineligibilityReason ||
+          "Symbol to transfer is not supported by the source wallet over the requested network.";
+        const networkName =
+          networkObj?.name || selectedNetworkKind.toUpperCase() || "this network";
+        throw new Error(
+          `This asset cannot be transferred from ${selectedAcc.name} on ${networkName}: ${reason}`
+        );
+      }
+
       const transferIdValue =
         data?.transferId ||
         data?.content?.transferId ||
@@ -859,7 +967,29 @@ export default function TransferPage() {
 
       const data = await res.json();
       setTransferResult(data);
-      setStep("success");
+
+      const executeStatus: string | undefined =
+        data?.content?.status ||
+        data?.status ||
+        data?.executeTransferResult?.status;
+
+      if (executeStatus === "mfaRequired") {
+        setError(
+          "MFA required. Enter the code you received (SMS/app) and click Execute again to complete the transfer."
+        );
+        // Stay on execute step so user can re-submit with MFA
+        setStep("execute");
+        return;
+      }
+
+      if (executeStatus === "succeeded") {
+        setStep("success");
+      } else {
+        setError(
+          `Transfer status: ${executeStatus || "unknown"}. Check History for final status.`
+        );
+        setStep("execute");
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -872,24 +1002,9 @@ export default function TransferPage() {
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50 p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold mb-6">Mesh API Demo</h1>
-        <Navigation />
-
-        <div className="bg-blue-600/20 border border-blue-500/50 rounded-lg p-4 mb-6">
-          <p className="text-sm">
-            <strong>Managed Transfer APIs</strong> Using server-side APIs:{" "}
-            <span className={step === "configure" ? "text-blue-400 font-bold" : "text-zinc-400"}>
-              /configure
-            </span>{" "}
-            →{" "}
-            <span className={step === "preview" ? "text-blue-400 font-bold" : "text-zinc-400"}>
-              /preview
-            </span>{" "}
-            →{" "}
-            <span className={step === "execute" ? "text-blue-400 font-bold" : "text-zinc-400"}>
-              /execute
-            </span>
-          </p>
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-3xl font-bold">Mesh API</h1>
+          <Navigation />
         </div>
 
         <div className="bg-zinc-900 rounded-lg p-6">
@@ -946,7 +1061,23 @@ export default function TransferPage() {
               </div>
 
               <div>
-                <label className="block text-sm text-zinc-400 mb-2">From Account</label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm text-zinc-400">From Account</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const loaded = loadConnectedAccountsFromStorage();
+                      console.log("[Transfer] Refreshed connected accounts:", {
+                        source: connectedAccountsSource,
+                        count: Array.isArray(loaded) ? loaded.length : 0,
+                      });
+                    }}
+                    className="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                    title={`Reload from storage (last source: ${connectedAccountsSource})`}
+                  >
+                    Refresh
+                  </button>
+                </div>
                 <select
                   value={selectedAccount}
                   onChange={(e) => setSelectedAccount(e.target.value)}
@@ -970,9 +1101,14 @@ export default function TransferPage() {
                 </select>
                 {selectedNetwork && accounts.length === 0 && (
                   <p className="text-xs text-zinc-500 mt-1">
-                    No connected accounts support transfers on this network
+                    {connectedAccounts.length === 0
+                      ? `No connected accounts loaded. Storage source: ${connectedAccountsSource}.`
+                      : "Connected accounts found, but none match a transfer-enabled integration type."}
                   </p>
                 )}
+                <p className="text-xs text-zinc-600 mt-1">
+                  Debug: connectedAccounts={connectedAccounts.length}, filteredAccounts={accounts.length}
+                </p>
               </div>
 
               <div>
@@ -980,20 +1116,43 @@ export default function TransferPage() {
                   <label className="block text-sm text-zinc-400">
                     To Address
                   </label>
-                  {walletAddresses.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setToAddressMode(toAddressMode === "select" ? "manual" : "select");
-                      }}
-                      className="text-xs text-blue-400 hover:text-blue-300 underline"
-                    >
-                      {toAddressMode === "select" ? "Enter manually" : "Select from wallets"}
-                    </button>
-                  )}
+                </div>
+
+                <div className="flex gap-2 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToAddressMode("select");
+                      const next = String(filteredWalletAddresses?.[0]?.address || "").trim();
+                      if (!toAddress && next) {
+                        setToAddress(next);
+                        window.localStorage.setItem("app_wallet_address", next);
+                      }
+                    }}
+                    disabled={walletAddresses.length === 0}
+                    className={`text-xs px-3 py-1 rounded ${
+                      toAddressMode === "select"
+                        ? "bg-blue-600 text-white"
+                        : "bg-zinc-700 text-zinc-300 hover:bg-zinc-600"
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    title={walletAddresses.length === 0 ? "Connect a wallet to select from connected addresses" : undefined}
+                  >
+                    Connected wallet
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setToAddressMode("manual")}
+                    className={`text-xs px-3 py-1 rounded ${
+                      toAddressMode === "manual"
+                        ? "bg-blue-600 text-white"
+                        : "bg-zinc-700 text-zinc-300 hover:bg-zinc-600"
+                    }`}
+                  >
+                    Enter manually
+                  </button>
                 </div>
                 
-                {toAddressMode === "select" && filteredWalletAddresses.length > 0 ? (
+                {toAddressMode === "select" ? (
                   <select
                     value={toAddress}
                     onChange={(e) => {
@@ -1001,14 +1160,24 @@ export default function TransferPage() {
                       setToAddress(addr);
                       window.localStorage.setItem("app_wallet_address", addr);
                     }}
-                    className="w-full bg-zinc-800 rounded-lg px-4 py-2 text-zinc-100"
+                    disabled={filteredWalletAddresses.length === 0}
+                    className="w-full bg-zinc-800 rounded-lg px-4 py-2 text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <option value="">Select a wallet address...</option>
-                    {filteredWalletAddresses.map((wallet, idx) => (
-                      <option key={idx} value={wallet.address}>
-                        {wallet.name} - {wallet.address.substring(0, 10)}...{wallet.address.substring(wallet.address.length - 8)}
-                      </option>
-                    ))}
+                    <option value="">
+                      {walletAddresses.length === 0
+                        ? "No connected wallets. Switch to manual."
+                        : filteredWalletAddresses.length === 0
+                          ? "No connected wallet addresses match this network."
+                          : "Select a wallet address..."}
+                    </option>
+                    {filteredWalletAddresses.map((wallet, idx) => {
+                      const addr = String(wallet.address || "");
+                      return (
+                        <option key={idx} value={addr}>
+                          {wallet.name} - {addr.substring(0, 10)}...{addr.substring(addr.length - 8)}
+                        </option>
+                      );
+                    })}
                   </select>
                 ) : (
                   <input
@@ -1096,16 +1265,6 @@ export default function TransferPage() {
           {step === "preview" && (
             <div className="space-y-4">
               <p className="text-zinc-400">Review transfer details before executing</p>
-              {configureData && !previewData && (
-                <div className="bg-zinc-800 rounded-lg p-4">
-                  <p className="text-xs text-zinc-400 mb-2">
-                    Configure response (Mesh may return quote/options here; transferId can be created in Preview):
-                  </p>
-                  <pre className="text-xs overflow-auto">
-                    {JSON.stringify(configureData, null, 2)}
-                  </pre>
-                </div>
-              )}
               <button
                 onClick={handlePreview}
                 disabled={loading}

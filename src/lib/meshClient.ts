@@ -876,17 +876,18 @@ export async function getDepositAddress(
   return json;
 }
 
-// Get deposit addresses (plural) using POST /api/v1/transfers/managed/addresses/get
+// Get deposit addresses (plural) using POST /api/v1/transfers/managed/address/list
 export async function getDepositAddresses(
   authToken: string,
   providerType: string,
-  params?: {
-    networkId?: string;
-    symbol?: string;
+  params: {
+    symbol: string;
+    networks?: Array<{ networkId?: string; caipId?: string }>;
+    mfaCode?: string;
   }
 ) {
   const res = await fetch(
-    `${MESH_API_URL}/api/v1/transfers/managed/addresses/get`,
+    `${MESH_API_URL}/api/v1/transfers/managed/address/list`,
     {
       method: "POST",
       headers: {
@@ -898,7 +899,7 @@ export async function getDepositAddresses(
       body: JSON.stringify({
         authToken,
         type: providerType,
-        ...(params || {}),
+        ...params,
       }),
     }
   );

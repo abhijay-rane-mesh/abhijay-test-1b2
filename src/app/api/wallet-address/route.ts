@@ -81,7 +81,10 @@ export async function POST(request: NextRequest) {
     // This is more reliable than trying to get a specific address
     if (type === "deFiWallet" || type === "metamask") {
       try {
-        const addressesResult = await getDepositAddresses(extractedToken, type);
+        const addressesResult = await getDepositAddresses(extractedToken, type, {
+          symbol: symbol || "ETH",
+          networks: networkId ? [{ networkId }] : undefined,
+        });
         console.log("[Wallet Address API] List endpoint response:", {
           hasContent: !!addressesResult.content,
           contentKeys: addressesResult.content ? Object.keys(addressesResult.content) : [],
@@ -138,18 +141,25 @@ export async function POST(request: NextRequest) {
           status: listError.status,
           response: listError.response?.data || listError.response?.text || "N/A",
         });
-        // Don't fall through - return error instead
-        return NextResponse.json(
-          { error: `Failed to fetch wallet addresses: ${listError.message}` },
-          { status: 500 }
-        );
+        // DeFi wallets often do not support deposit address lookups via server-side endpoints.
+        // Returning 200 with a null address keeps the client flow resilient (it can fall back to portfolio/holdings).
+        return NextResponse.json({
+          status: "ok",
+          content: { address: null },
+          message:
+            "Wallet address lookup is not available for this DeFi wallet via server-side API. " +
+            "The client can fall back to the wallet's own address (if available) or portfolio extraction.",
+        });
       }
       
       // If we get here, no addresses were found
-      return NextResponse.json(
-        { error: "No wallet addresses found for this DeFi wallet. The wallet may not have any addresses yet, or addresses may be available in holdings distribution when positions exist." },
-        { status: 404 }
-      );
+      return NextResponse.json({
+        status: "ok",
+        content: { address: null },
+        message:
+          "No wallet addresses were returned for this DeFi wallet. " +
+          "The client can fall back to portfolio extraction when positions exist.",
+      });
     }
 
     const result = await getDepositAddress(extractedToken, type, {

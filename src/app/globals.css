@@ -24,3 +24,10 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Hide Next.js DevTools "N" badge in the UI */
+#next-devtools-entry,
+#__next-devtools-button,
+[data-next-devtools] {
+  display: none !important;
+}

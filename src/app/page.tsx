@@ -5,6 +5,29 @@ import { useEffect, useState } from "react";
 import Navigation from "@/components/Navigation";
 import { getAccountDisplayName } from "@/lib/accountUtils";
 
+const STEPS = [
+  {
+    icon: "∞",
+    label: "Connect",
+    sub: "Link exchanges & wallets",
+  },
+  {
+    icon: "₿",
+    label: "Portfolio",
+    sub: "See everything in one view",
+  },
+  {
+    icon: "⇄",
+    label: "Transfer",
+    sub: "Move assets with Managed Transfers",
+  },
+  {
+    icon: "☐",
+    label: "History",
+    sub: "Track every on-chain move",
+  },
+];
+
 const clientId = process.env.NEXT_PUBLIC_MESH_CLIENT_ID!;
 
 export default function Home() {
@@ -15,6 +38,12 @@ export default function Home() {
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [providerType, setProviderType] = useState<string | null>(null);
   const [meshAccountId, setMeshAccountId] = useState<string | null>(null);
+  // Network preference is fixed to "auto" in the UI.
+  const [walletNetworkPreference] = useState<"auto" | "solana" | "evm">("auto");
+  const [stepIndex, setStepIndex] = useState(0);
+  const nextStepIndex = (stepIndex + 1) % STEPS.length;
+  const currentStep = STEPS[stepIndex];
+  const nextStep = STEPS[nextStepIndex];
 
   // Load stored accounts from localStorage and update display names
   useEffect(() => {
@@ -53,6 +82,15 @@ export default function Home() {
       const token = window.localStorage.getItem("mesh_access_token");
       if (token) setAccessToken(token);
     }
+  }, []);
+
+  // Simple 1s step animation in the header banner
+  useEffect(() => {
+    const id = setInterval(
+      () => setStepIndex((prev) => (prev + 1) % STEPS.length),
+      1000
+    );
+    return () => clearInterval(id);
   }, []);
 
   // Dynamically import the Mesh SDK on the client
@@ -335,10 +373,14 @@ export default function Home() {
               payload.walletAddress ??
               null;
             
-            // For DeFi wallets, if we don't have an address yet, we'll fetch it after connection
-            // Check if accountId looks like an Ethereum address (starts with 0x and is 42 chars)
-            if (!walletAddress && accountId && typeof accountId === "string" && accountId.startsWith("0x") && accountId.length === 42) {
-              walletAddress = accountId; // Only use accountId if it's a valid Ethereum address
+            // For DeFi wallets, if we don't have an address yet, we'll fetch it after connection.
+            // Some providers (e.g., MetaMask) may return the EVM address without the 0x prefix.
+            if (!walletAddress && accountId && typeof accountId === "string") {
+              if (accountId.startsWith("0x") && accountId.length === 42) {
+                walletAddress = accountId;
+              } else if (/^[0-9a-fA-F]{40}$/.test(accountId)) {
+                walletAddress = `0x${accountId}`;
+              }
             }
             
             // For Coinbase Wallet and other DeFi wallets, we'll fetch the address via API
@@ -579,6 +621,35 @@ export default function Home() {
       setIsConnecting(true);
       setError(null);
 
+      // If user prefers Solana, try to include a Solana transfer context so Mesh Link routes Phantom to Solana
+      // instead of defaulting to the EVM provider.
+      let solanaTransferOptions: any = undefined;
+      if (walletNetworkPreference === "solana") {
+        try {
+          const networksRes = await fetch("/api/networks");
+          const networksJson = await networksRes.json().catch(() => ({}));
+          const networksList =
+            networksJson?.content?.networks || networksJson?.networks || [];
+          const solanaNetwork =
+            networksList.find((n: any) => n?.networkType === "solana") ||
+            networksList.find((n: any) => String(n?.name || "").toLowerCase().includes("solana"));
+          const solanaNetworkId = solanaNetwork?.id;
+          if (solanaNetworkId) {
+            solanaTransferOptions = {
+              toAddresses: [
+                {
+                  networkId: solanaNetworkId,
+                  symbol: "SOL",
+                  // address is optional; Link can still use this to route the correct wallet network
+                },
+              ],
+            };
+          }
+        } catch (e) {
+          console.warn("[Connect Exchange] Failed to prefetch Solana network for Link token:", e);
+        }
+      }
+
       const response = await fetch("/api/linktoken", {
         method: "POST",
         headers: {
@@ -586,6 +657,21 @@ export default function Home() {
         },
         body: JSON.stringify({
           userId: "user-local-1",
+          // Hint Mesh Link which wallet network we want when connecting multi-chain wallets like Phantom.
+          // This helps ensure Phantom connects as Solana (base58) vs EVM (0x...) when desired.
+          ...(walletNetworkPreference === "auto"
+            ? {}
+            : {
+                verifyWalletOptions: {
+                  networkType: walletNetworkPreference,
+                  verificationMethods: ["signedMessage"],
+                  message:
+                    walletNetworkPreference === "solana"
+                      ? "Mesh Demo: verify your Solana wallet ownership"
+                      : "Mesh Demo: verify your EVM wallet ownership",
+                },
+                ...(solanaTransferOptions ? { transferOptions: solanaTransferOptions } : {}),
+              }),
         }),
       });
 
@@ -651,13 +737,89 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50 p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold mb-6">Mesh API Demo</h1>
-        <Navigation />
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-3xl font-bold">Mesh API</h1>
+          <Navigation />
+        </div>
 
-        <div className="bg-blue-600/20 border border-blue-500/50 rounded-lg p-4 mb-6">
-          <p className="text-sm">
-            <strong>Dynamic Connection System.</strong> Connect any exchange or wallet using Mesh Link SDK. Connections are stored in Zustand and persisted to localStorage. Click the button below to open Mesh Link and select which account to connect.
-          </p>
+        <div className="bg-zinc-950/60 border border-emerald-500/40 rounded-2xl p-5 mb-8 shadow-[0_0_40px_rgba(16,185,129,0.25)]">
+          {/* Top step headers with progress bar */}
+          <div className="flex items-center justify-between gap-6 mb-6">
+            {STEPS.map((step, idx) => {
+              const isActive = idx === stepIndex;
+              const isCompleted = idx < stepIndex;
+              return (
+                <div
+                  key={step.label}
+                  className="flex-1 flex flex-col items-center text-center"
+                >
+                  <div
+                    className={`flex h-10 w-10 items-center justify-center rounded-full border transition-colors ${
+                      isActive || isCompleted
+                        ? "border-emerald-400 bg-emerald-500/20"
+                        : "border-emerald-800 bg-emerald-900/40"
+                    }`}
+                  >
+                    <span className="text-lg">
+                      {step.icon}
+                    </span>
+                  </div>
+                  <p
+                    className={`mt-2 text-[11px] font-medium ${
+                      isActive || isCompleted
+                        ? "text-emerald-100"
+                        : "text-emerald-900/70"
+                    }`}
+                  >
+                    {step.label}
+                  </p>
+                  <div className="mt-2 h-[3px] w-full rounded-full bg-emerald-900/60 overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        isCompleted || isActive
+                          ? "bg-emerald-400"
+                          : "bg-transparent"
+                      }`}
+                      style={{
+                        width: isCompleted ? "100%" : isActive ? "60%" : "0%",
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Main animated card showing current step only */}
+          <div className="mt-1 rounded-2xl px-8 py-6 flex flex-col items-center justify-center gap-6 text-center">
+            <div className="flex items-center justify-center">
+              <div className="flex h-20 w-20 items-center justify-center rounded-2xl border-2 border-emerald-400 bg-emerald-500/15 shadow-[0_0_35px_rgba(16,185,129,0.7)]">
+                <span className="text-3xl">
+                  {currentStep.icon}
+                </span>
+              </div>
+            </div>
+            <div className="text-center max-w-md">
+              <p className="text-xl md:text-2xl font-semibold text-emerald-50">
+                {currentStep.label}
+              </p>
+              <p className="mt-1 text-sm text-emerald-100/90">
+                {currentStep.sub}
+              </p>
+            </div>
+          </div>
+
+          {/* Dots pager */}
+          <div className="flex justify-center gap-2 mt-4">
+            {STEPS.map((_, idx) => (
+              <span
+                key={idx}
+                className={`h-1.5 w-4 rounded-full transition-colors ${
+                  idx === stepIndex ? "bg-emerald-400" : "bg-emerald-900"
+                }`}
+              />
+            ))}
+          </div>
         </div>
 
         <div className="text-center mb-8">
@@ -665,7 +827,7 @@ export default function Home() {
             type="button"
             onClick={handleConnectExchange}
             disabled={isConnecting}
-            className="inline-flex items-center justify-center rounded-lg bg-purple-600 px-6 py-3 text-lg font-medium text-white hover:bg-purple-700 disabled:opacity-60"
+            className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-6 py-3 text-lg font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
           >
             {isConnecting ? "Opening Mesh Link..." : "+ Connect Account"}
           </button>
@@ -765,7 +927,7 @@ export default function Home() {
                         // Navigate to transfer page with this account pre-selected
                         window.location.href = `/transfer?accountId=${account.accountId}`;
                       }}
-                      className="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-sm"
+                      className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 rounded text-sm"
                     >
                       Transfer →
                     </button>
